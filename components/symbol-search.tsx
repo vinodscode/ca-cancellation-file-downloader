@@ -1,12 +1,13 @@
 "use client"
 
 import { useState, useMemo } from "react"
-import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Search, FileText } from "lucide-react"
+import { useToast } from "@/hooks/use-toast"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Search, Download } from "lucide-react"
 
 interface Instrument {
   instrument_token: string
@@ -23,115 +24,137 @@ interface Instrument {
   exchange: string
 }
 
-interface CompanyData {
-  baseSymbol: string
-  name: string
-  symbols: Instrument[]
-}
-
 interface SymbolSearchProps {
   instruments: Instrument[]
 }
 
 export function SymbolSearch({ instruments }: SymbolSearchProps) {
   const [searchTerm, setSearchTerm] = useState("")
-  const [selectedSegment, setSelectedSegment] = useState("all")
-  const [selectedCorporateAction, setSelectedCorporateAction] = useState("")
+  const { toast } = useToast()
+  const [selectedCorporateActions, setSelectedCorporateActions] = useState<Record<string, string>>({})
 
-  // Group instruments by company
-  const companiesData = useMemo(() => {
-    const companyMap = new Map<string, CompanyData>()
+  const setSelectedCorporateAction = (baseSymbol: string, actionType: string) => {
+    setSelectedCorporateActions((prev) => ({
+      ...prev,
+      [baseSymbol]: actionType,
+    }))
+  }
 
-    instruments.forEach((instrument) => {
+  const searchResults = useMemo(() => {
+    if (!searchTerm || searchTerm.length < 2) return []
+
+    return instruments.filter(
+      (instrument) =>
+        instrument.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        instrument.tradingsymbol.toLowerCase().includes(searchTerm.toLowerCase()),
+    )
+  }, [instruments, searchTerm])
+
+  // Group results by company/underlying
+  const groupedResults = useMemo(() => {
+    const groups = {}
+
+    searchResults.forEach((instrument) => {
       // Extract base symbol (remove expiry and strike info)
       let baseSymbol = instrument.tradingsymbol
-      if (instrument.instrument_type !== "EQ") {
-        // For derivatives, extract the base symbol
-        baseSymbol = instrument.tradingsymbol.replace(/\d{2}[A-Z]{3}\d{2,4}(CE|PE|FUT).*/, "")
-        baseSymbol = baseSymbol.replace(/\d{2}[A-Z]{3}(FUT|CE|PE).*/, "")
-        baseSymbol = baseSymbol.replace(/(FUT|CE|PE).*/, "")
+
+      // For derivatives, extract the underlying symbol
+      if (instrument.segment === "NFO-FUT" || instrument.segment === "NFO-OPT") {
+        // Remove date and strike/option type suffixes
+        baseSymbol = baseSymbol.replace(/\d{2}[A-Z]{3}\d{2,4}(FUT|CE|PE)$/i, "")
+        baseSymbol = baseSymbol.replace(/\d{2}[A-Z]{3}(FUT|CE|PE)$/i, "")
       }
 
-      if (!companyMap.has(baseSymbol)) {
-        companyMap.set(baseSymbol, {
+      if (!groups[baseSymbol]) {
+        groups[baseSymbol] = {
           baseSymbol,
           name: instrument.name,
-          symbols: [],
-        })
+          instruments: [],
+        }
       }
 
-      companyMap.get(baseSymbol)!.symbols.push(instrument)
+      groups[baseSymbol].instruments.push(instrument)
     })
 
-    return Array.from(companyMap.values()).sort((a, b) => a.baseSymbol.localeCompare(b.baseSymbol))
-  }, [instruments])
+    return Object.values(groups)
+  }, [searchResults])
 
-  // Filter companies based on search and segment
-  const filteredCompanies = useMemo(() => {
-    return companiesData.filter((company) => {
-      const matchesSearch =
-        searchTerm === "" ||
-        company.baseSymbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        company.name.toLowerCase().includes(searchTerm.toLowerCase())
+  const exportCompanySymbols = (companyData) => {
+    const corporateActionType = selectedCorporateActions[companyData.baseSymbol]
 
-      const matchesSegment =
-        selectedSegment === "all" || company.symbols.some((symbol) => symbol.segment === selectedSegment)
-
-      return matchesSearch && matchesSegment
-    })
-  }, [companiesData, searchTerm, selectedSegment])
-
-  const exportCompanySymbols = (companyData: CompanyData) => {
-    if (!selectedCorporateAction) {
-      alert("Please select a Corporate Action type before exporting.")
+    if (!corporateActionType) {
+      toast({
+        title: "No Corporate Action Selected",
+        description: "Please select a corporate action type before exporting.",
+        variant: "destructive",
+      })
       return
     }
 
-    // Sort symbols in the specified order: NSE, BSE, NFO Futures, NFO Options
-    const sortedSymbols = [...companyData.symbols].sort((a, b) => {
-      const order = { NSE: 1, BSE: 2, "NFO-FUT": 3, "NFO-OPT": 4 }
-      const aOrder = order[a.segment] || 5
-      const bOrder = order[b.segment] || 5
+    const formattedSymbols = companyData.instruments
+      .map((instrument) => {
+        let exchangePrefix = ""
+        switch (instrument.segment) {
+          case "NSE":
+            exchangePrefix = "NSE:"
+            break
+          case "BSE":
+            exchangePrefix = "BSE:"
+            break
+          case "NFO-FUT":
+          case "NFO-OPT":
+            exchangePrefix = "NFO:"
+            break
+          default:
+            exchangePrefix = `${instrument.exchange}:`
+        }
+        return {
+          symbol: `${exchangePrefix}${instrument.tradingsymbol}`,
+          segment: instrument.segment,
+          instrumentType: instrument.instrument_type,
+        }
+      })
+      .sort((a, b) => {
+        // Define the order priority
+        const segmentOrder = { NSE: 1, BSE: 2, "NFO-FUT": 3, "NFO-OPT": 4 }
 
-      if (aOrder !== bOrder) {
-        return aOrder - bOrder
-      }
+        // First sort by segment priority
+        const segmentDiff = (segmentOrder[a.segment] || 999) - (segmentOrder[b.segment] || 999)
+        if (segmentDiff !== 0) return segmentDiff
 
-      // Within the same segment, sort alphabetically
-      return a.tradingsymbol.localeCompare(b.tradingsymbol)
-    })
+        // Within NFO, sort FUT before OPT
+        if (a.segment === "NFO-FUT" && b.segment === "NFO-OPT") return -1
+        if (a.segment === "NFO-OPT" && b.segment === "NFO-FUT") return 1
 
-    // Create formatted symbols with exchange prefix
-    const formattedSymbols = sortedSymbols.map((symbol) => {
-      const exchange = symbol.segment === "NFO-FUT" || symbol.segment === "NFO-OPT" ? "NFO" : symbol.segment
-      return `${exchange}:${symbol.tradingsymbol}`
-    })
+        // Then sort alphabetically by symbol
+        return a.symbol.localeCompare(b.symbol)
+      })
+      .map((item) => item.symbol)
 
-    // Create the text content with heading
-    const heading = `Corporate Action - ${selectedCorporateAction}`
-    const txtContent = `${heading}\n${formattedSymbols.join("\n")}`
+    const txtContent = `Corporate Action - ${corporateActionType.replace("_", " ")}\n${formattedSymbols.join("\n")}`
 
-    // Generate filename with current date
+    // Generate filename with corporate action and current date
     const now = new Date()
     const day = now.getDate().toString().padStart(2, "0")
-    const month = now.toLocaleDateString("en-US", { month: "short" })
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    const month = monthNames[now.getMonth()]
     const year = now.getFullYear()
 
-    const filename = `CA_${selectedCorporateAction.replace(/\s+/g, "_")}_${day}_${month}_${year}.txt`
+    const filename = `CA_${corporateActionType}_${day}_${month}_${year}.txt`
 
-    // Create and download the file
     const blob = new Blob([txtContent], { type: "text/plain" })
-    const url = URL.createObjectURL(blob)
+    const url = window.URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
     a.download = filename
-    document.body.appendChild(a)
     a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
+    window.URL.revokeObjectURL(url)
 
-  const corporateActions = ["Stock Split", "Bonus", "Demerger", "Dividend", "Rights Issue"]
+    toast({
+      title: "Export Complete",
+      description: `Exported ${formattedSymbols.length} symbols for ${corporateActionType} corporate action to ${filename}.`,
+    })
+  }
 
   return (
     <Card>
@@ -140,101 +163,85 @@ export function SymbolSearch({ instruments }: SymbolSearchProps) {
           <Search className="h-5 w-5" />
           Symbol Search & Export
         </CardTitle>
-        <CardDescription>Search for companies and export their trading symbols for corporate actions</CardDescription>
+        <CardDescription>Search for specific companies and export all their trading symbols</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Search and Filter Controls */}
-        <div className="flex flex-col sm:flex-row gap-4">
-          <div className="flex-1">
-            <Input
-              placeholder="Search by company name or symbol..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full"
-            />
-          </div>
-          <div className="flex gap-2">
-            <Select value={selectedSegment} onValueChange={setSelectedSegment}>
-              <SelectTrigger className="w-40">
-                <SelectValue placeholder="All Segments" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Segments</SelectItem>
-                <SelectItem value="NSE">NSE</SelectItem>
-                <SelectItem value="BSE">BSE</SelectItem>
-                <SelectItem value="NFO-FUT">NFO-FUT</SelectItem>
-                <SelectItem value="NFO-OPT">NFO-OPT</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={selectedCorporateAction} onValueChange={setSelectedCorporateAction}>
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder="Select Corporate Action" />
-              </SelectTrigger>
-              <SelectContent>
-                {corporateActions.map((action) => (
-                  <SelectItem key={action} value={action}>
-                    {action}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+        <div className="relative">
+          <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search company name or symbol (e.g., MOTHERSON, RELIANCE, TCS)..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="pl-10"
+          />
         </div>
 
-        {/* Results */}
-        <div className="space-y-3 max-h-96 overflow-y-auto">
-          {filteredCompanies.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              <Search className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>No companies found matching your search criteria.</p>
+        {searchTerm.length >= 2 && (
+          <div className="space-y-4">
+            <div className="text-sm text-muted-foreground">
+              Found {groupedResults.length} companies with {searchResults.length} total instruments
             </div>
-          ) : (
-            filteredCompanies.map((companyData) => (
-              <div key={companyData.baseSymbol} className="border rounded-lg p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <h3 className="font-semibold">{companyData.baseSymbol}</h3>
-                    <p className="text-sm text-muted-foreground">{companyData.name}</p>
-                  </div>
-                  <Button
-                    onClick={() => exportCompanySymbols(companyData)}
-                    size="sm"
-                    className="flex items-center gap-2"
-                    disabled={!selectedCorporateAction}
-                  >
-                    <Download className="h-4 w-4" />
-                    Export ({companyData.symbols.length})
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2 mt-3">
-                  {companyData.symbols.map((symbol, index) => (
-                    <Badge
-                      key={index}
-                      variant={
-                        symbol.segment === "NSE"
-                          ? "default"
-                          : symbol.segment === "BSE"
-                            ? "secondary"
-                            : symbol.segment === "NFO-FUT"
-                              ? "destructive"
-                              : "outline"
-                      }
-                      className="text-xs"
-                    >
-                      {symbol.segment}: {symbol.tradingsymbol}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
 
-        {filteredCompanies.length > 0 && (
-          <div className="text-sm text-muted-foreground text-center">
-            Found {filteredCompanies.length} companies with{" "}
-            {filteredCompanies.reduce((total, company) => total + company.symbols.length, 0)} total symbols
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {groupedResults.map((companyData, index) => (
+                <div key={index} className="border rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-semibold">{companyData.baseSymbol}</h3>
+                      <p className="text-sm text-muted-foreground">{companyData.name}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Select onValueChange={(value) => setSelectedCorporateAction(companyData.baseSymbol, value)}>
+                        <SelectTrigger className="w-40">
+                          <SelectValue placeholder="Select CA Type" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Stock_Split">Stock Split</SelectItem>
+                          <SelectItem value="Bonus">Bonus</SelectItem>
+                          <SelectItem value="Demerger">Demerger</SelectItem>
+                          <SelectItem value="Dividend">Dividend</SelectItem>
+                          <SelectItem value="Rights_issue">Rights Issue</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        onClick={() => exportCompanySymbols(companyData)}
+                        size="sm"
+                        className="flex items-center gap-2"
+                        disabled={!selectedCorporateActions[companyData.baseSymbol]}
+                      >
+                        <FileText className="h-4 w-4" />
+                        Export ({companyData.instruments.length})
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-1">
+                    {companyData.instruments.slice(0, 10).map((instrument, idx) => (
+                      <Badge key={idx} variant="outline" className="text-xs">
+                        {instrument.segment === "NFO-FUT" || instrument.segment === "NFO-OPT"
+                          ? "NFO:"
+                          : `${instrument.segment}:`}
+                        {instrument.tradingsymbol}
+                      </Badge>
+                    ))}
+                    {companyData.instruments.length > 10 && (
+                      <Badge variant="secondary" className="text-xs">
+                        +{companyData.instruments.length - 10} more
+                      </Badge>
+                    )}
+                  </div>
+
+                  <div className="text-xs text-muted-foreground">
+                    Segments: {Array.from(new Set(companyData.instruments.map((i) => i.segment))).join(", ")}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
+        )}
+
+        {searchTerm.length >= 2 && groupedResults.length === 0 && (
+          <div className="text-center py-8 text-muted-foreground">No companies found matching "{searchTerm}"</div>
         )}
       </CardContent>
     </Card>
