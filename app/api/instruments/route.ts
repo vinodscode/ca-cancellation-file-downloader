@@ -1,94 +1,66 @@
 import { NextResponse } from "next/server"
-import { promises as fs } from "fs"
-import path from "path"
-
-const INSTRUMENTS_FILE_PATH = path.join(process.cwd(), "data", "instruments.csv")
-const INSTRUMENTS_JSON_PATH = path.join(process.cwd(), "data", "instruments.json")
 
 // Define the segments we want to keep
 const ALLOWED_SEGMENTS = ["NFO-OPT", "NFO-FUT", "NSE", "BSE"]
 
-async function ensureDataDirectory() {
-  const dataDir = path.join(process.cwd(), "data")
-  try {
-    await fs.access(dataDir)
-  } catch {
-    await fs.mkdir(dataDir, { recursive: true })
-  }
+// Simple in-memory cache as fallback
+let memoryCache = {
+  data: null,
+  timestamp: null,
+  isValid: false,
 }
 
-async function downloadAndStoreInstruments() {
-  try {
-    console.log("Downloading instruments from Kite API...")
+// Cache duration in milliseconds (1 hour)
+const CACHE_DURATION = 60 * 60 * 1000
 
-    // Try multiple approaches to download
-    const urls = ["https://api.kite.trade/instruments", "http://api.kite.trade/instruments"]
+async function downloadInstrumentsFromAPI() {
+  console.log("Downloading instruments from Kite API...")
 
-    let response
-    let lastError
+  const urls = ["https://api.kite.trade/instruments", "http://api.kite.trade/instruments"]
+  let lastError
 
-    for (const url of urls) {
-      try {
-        console.log(`Trying URL: ${url}`)
-        response = await fetch(url, {
-          method: "GET",
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            Accept: "text/csv,text/plain,*/*",
-            "Accept-Encoding": "gzip, deflate",
-            Connection: "keep-alive",
-            "Cache-Control": "no-cache",
-          },
-          timeout: 30000, // 30 second timeout
-        })
+  for (const url of urls) {
+    try {
+      console.log(`Attempting download from: ${url}`)
 
-        if (response.ok) {
-          console.log(`Success with URL: ${url}`)
-          console.log(`Response status: ${response.status}`)
-          console.log(`Content-Type: ${response.headers.get("content-type")}`)
-          console.log(`Content-Length: ${response.headers.get("content-length")}`)
-          break
-        } else {
-          console.log(`Failed with URL: ${url}, status: ${response.status}`)
-          lastError = new Error(`HTTP ${response.status}: ${response.statusText}`)
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+          Accept: "text/csv,text/plain,*/*",
+          "Accept-Encoding": "gzip, deflate",
+          Connection: "keep-alive",
+          "Cache-Control": "no-cache",
+        },
+        signal: controller.signal,
+      })
+
+      clearTimeout(timeoutId)
+
+      if (response.ok) {
+        const csvText = await response.text()
+        console.log(`Downloaded CSV size: ${csvText.length} characters`)
+
+        if (csvText.length < 1000) {
+          throw new Error(`Downloaded file seems too small (${csvText.length} characters)`)
         }
-      } catch (error) {
-        console.log(`Error with URL: ${url}`, error.message)
-        lastError = error
-        continue
+
+        return csvText
+      } else {
+        lastError = new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
+    } catch (error) {
+      console.log(`Error with URL ${url}:`, error.message)
+      lastError = error
+      continue
     }
-
-    if (!response || !response.ok) {
-      throw lastError || new Error("All download attempts failed")
-    }
-
-    // Get the response as text
-    const csvText = await response.text()
-    console.log(`Downloaded CSV size: ${csvText.length} characters`)
-
-    if (csvText.length < 1000) {
-      throw new Error(`Downloaded file seems too small (${csvText.length} characters). Expected around 7MB.`)
-    }
-
-    // Ensure data directory exists
-    await ensureDataDirectory()
-
-    // Store raw CSV
-    await fs.writeFile(INSTRUMENTS_FILE_PATH, csvText)
-    console.log("Raw CSV file stored successfully")
-
-    // Parse and filter instruments
-    const instruments = parseAndFilterCSV(csvText)
-    await fs.writeFile(INSTRUMENTS_JSON_PATH, JSON.stringify(instruments, null, 2))
-    console.log(`Parsed and stored ${instruments.length} filtered instruments as JSON`)
-
-    return instruments
-  } catch (error) {
-    console.error("Error downloading instruments:", error)
-    throw error
   }
+
+  throw lastError || new Error("All download attempts failed")
 }
 
 function parseAndFilterCSV(csvText: string) {
@@ -101,15 +73,13 @@ function parseAndFilterCSV(csvText: string) {
     }
 
     const headers = lines[0].split(",").map((header) => header.replace(/"/g, "").trim())
-    console.log(`Headers found: ${headers.join(", ")}`)
+    console.log(`Headers found: ${headers.slice(0, 5).join(", ")}...`)
 
     // Find the segment column index
     const segmentIndex = headers.findIndex((header) => header.toLowerCase() === "segment")
     if (segmentIndex === -1) {
       throw new Error("Segment column not found in CSV")
     }
-
-    console.log(`Segment column found at index: ${segmentIndex}`)
 
     let totalProcessed = 0
     let filteredCount = 0
@@ -153,7 +123,6 @@ function parseAndFilterCSV(csvText: string) {
     console.log(`Total lines processed: ${totalProcessed}`)
     console.log(`Lines matching segment filter: ${filteredCount}`)
     console.log(`Valid instruments after all filtering: ${validInstruments.length}`)
-    console.log(`Segments included: ${ALLOWED_SEGMENTS.join(", ")}`)
 
     // Log segment distribution
     const segmentCounts = {}
@@ -170,22 +139,235 @@ function parseAndFilterCSV(csvText: string) {
   }
 }
 
-async function getStoredInstruments() {
+async function trySupabaseOperation(operation: () => Promise<any>) {
   try {
-    const jsonData = await fs.readFile(INSTRUMENTS_JSON_PATH, "utf-8")
-    return JSON.parse(jsonData)
+    // Check if Supabase is configured
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      console.log("Supabase not configured, skipping operation")
+      return null
+    }
+
+    const { createClient } = await import("@supabase/supabase-js")
+    const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+
+    return await operation(supabase)
   } catch (error) {
-    console.log("No stored instruments found, will download fresh data")
+    console.error("Supabase operation failed:", error.message)
     return null
   }
 }
 
-async function getFileAge(filePath: string): Promise<number> {
+async function storeInSupabase(instruments: any[], csvText: string) {
+  return await trySupabaseOperation(async (supabase) => {
+    console.log("Storing instruments data in Supabase...")
+
+    // Test connection first
+    const { error: testError } = await supabase.from("instruments_cache").select("id").limit(1)
+
+    if (testError && testError.message.includes("does not exist")) {
+      console.log("Supabase table doesn't exist, skipping storage")
+      return null
+    }
+
+    if (testError && (testError.message.includes("JWT") || testError.message.includes("auth"))) {
+      console.log("Supabase authentication failed, skipping storage")
+      return null
+    }
+
+    // Prepare optimized data
+    const optimizedInstruments = instruments.map((instrument) => ({
+      tradingsymbol: instrument.tradingsymbol || "",
+      name: instrument.name || "",
+      instrument_type: instrument.instrument_type || "",
+      segment: instrument.segment || "",
+      exchange: instrument.exchange || "",
+      lot_size: instrument.lot_size || "",
+      expiry: instrument.expiry || "",
+      strike: instrument.strike || "",
+      instrument_token: instrument.instrument_token || "",
+      exchange_token: instrument.exchange_token || "",
+      last_price: instrument.last_price || "",
+      tick_size: instrument.tick_size || "",
+    }))
+
+    const dataSizeMB = JSON.stringify(optimizedInstruments).length / (1024 * 1024)
+    console.log(`Data size: ${dataSizeMB.toFixed(2)} MB`)
+
+    const csvMetadata = {
+      size: csvText.length,
+      lines: csvText.split("\n").length,
+      headers:
+        csvText
+          .split("\n")[0]
+          ?.split(",")
+          .slice(0, 10)
+          .map((h) => h.replace(/"/g, "").trim()) || [],
+    }
+
+    const cacheRecord = {
+      id: "instruments_cache",
+      instruments_data: optimizedInstruments,
+      csv_metadata: csvMetadata,
+      last_updated: new Date().toISOString(),
+      record_count: instruments.length,
+      data_size_mb: Number(dataSizeMB.toFixed(2)),
+      segments_included: ALLOWED_SEGMENTS,
+    }
+
+    const { data, error } = await supabase.from("instruments_cache").upsert(cacheRecord, { onConflict: "id" }).select()
+
+    if (error) {
+      console.error("Supabase storage error:", error.message)
+      return null
+    }
+
+    console.log("Successfully stored in Supabase")
+    return data
+  })
+}
+
+async function getFromSupabase() {
+  return await trySupabaseOperation(async (supabase) => {
+    console.log("Fetching from Supabase...")
+
+    const { data, error } = await supabase.from("instruments_cache").select("*").eq("id", "instruments_cache").single()
+
+    if (error) {
+      if (error.code === "PGRST116") {
+        console.log("No cached data found")
+        return null
+      }
+      console.error("Supabase fetch error:", error.message)
+      return null
+    }
+
+    if (!data || !Array.isArray(data.instruments_data)) {
+      console.log("Invalid data structure in cache")
+      return null
+    }
+
+    console.log(`Retrieved ${data.record_count} instruments from cache`)
+    return data
+  })
+}
+
+function isCacheValid(lastUpdated: string): boolean {
+  const cacheAge = Date.now() - new Date(lastUpdated).getTime()
+  return cacheAge < CACHE_DURATION
+}
+
+function updateMemoryCache(instruments: any[]) {
+  memoryCache = {
+    data: instruments,
+    timestamp: new Date().toISOString(),
+    isValid: true,
+  }
+}
+
+function getMemoryCache() {
+  if (!memoryCache.isValid || !memoryCache.data || !memoryCache.timestamp) {
+    return null
+  }
+
+  if (!isCacheValid(memoryCache.timestamp)) {
+    console.log("Memory cache is stale")
+    return null
+  }
+
+  console.log("Using memory cache")
+  return {
+    instruments_data: memoryCache.data,
+    last_updated: memoryCache.timestamp,
+    record_count: memoryCache.data.length,
+  }
+}
+
+async function processInstrumentsData(forceRefresh = false) {
+  let instruments = null
+  const fromCache = false
+  let lastUpdated = new Date().toISOString()
+  let cacheStatus = "no_cache"
+
   try {
-    const stats = await fs.stat(filePath)
-    return Date.now() - stats.mtime.getTime()
-  } catch {
-    return Number.POSITIVE_INFINITY // File doesn't exist
+    // Try memory cache first (fastest)
+    if (!forceRefresh) {
+      const memCache = getMemoryCache()
+      if (memCache) {
+        return {
+          instruments: memCache.instruments_data,
+          fromCache: true,
+          lastUpdated: memCache.last_updated,
+          cacheStatus: "memory_cache",
+        }
+      }
+    }
+
+    // Try Supabase cache
+    if (!forceRefresh) {
+      const cachedData = await getFromSupabase()
+      if (cachedData && isCacheValid(cachedData.last_updated)) {
+        console.log("Using valid Supabase cache")
+        updateMemoryCache(cachedData.instruments_data)
+        return {
+          instruments: cachedData.instruments_data,
+          fromCache: true,
+          lastUpdated: cachedData.last_updated,
+          cacheStatus: "supabase_cache",
+        }
+      }
+    }
+
+    // Download fresh data
+    console.log("Downloading fresh data")
+    const csvText = await downloadInstrumentsFromAPI()
+    const parsedInstruments = parseAndFilterCSV(csvText)
+
+    instruments = parsedInstruments
+    lastUpdated = new Date().toISOString()
+    cacheStatus = forceRefresh ? "force_refresh" : "fresh_download"
+
+    // Update caches (don't fail if caching fails)
+    updateMemoryCache(instruments)
+
+    try {
+      await storeInSupabase(parsedInstruments, csvText)
+    } catch (storageError) {
+      console.log("Supabase storage failed, continuing with fresh data")
+    }
+
+    return {
+      instruments,
+      fromCache: false,
+      lastUpdated,
+      cacheStatus,
+    }
+  } catch (error) {
+    console.error("Error processing data:", error)
+
+    // Try fallback to any available cache
+    const memCache = getMemoryCache()
+    if (memCache) {
+      console.log("Using stale memory cache as fallback")
+      return {
+        instruments: memCache.instruments_data,
+        fromCache: true,
+        lastUpdated: memCache.last_updated,
+        cacheStatus: "fallback_memory",
+      }
+    }
+
+    const staleSupabase = await getFromSupabase()
+    if (staleSupabase) {
+      console.log("Using stale Supabase cache as fallback")
+      return {
+        instruments: staleSupabase.instruments_data,
+        fromCache: true,
+        lastUpdated: staleSupabase.last_updated,
+        cacheStatus: "fallback_supabase",
+      }
+    }
+
+    throw error
   }
 }
 
@@ -194,49 +376,54 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const forceRefresh = searchParams.get("refresh") === "true"
 
-    // Check if we should use cached data (less than 1 hour old) or refresh
-    const fileAge = await getFileAge(INSTRUMENTS_JSON_PATH)
-    const oneHour = 60 * 60 * 1000 // 1 hour in milliseconds
+    console.log(`GET /api/instruments - forceRefresh: ${forceRefresh}`)
 
-    let instruments
+    const result = await processInstrumentsData(forceRefresh)
 
-    if (!forceRefresh && fileAge < oneHour) {
-      console.log("Using cached instruments data")
-      instruments = await getStoredInstruments()
+    if (!result.instruments || !Array.isArray(result.instruments)) {
+      return NextResponse.json(
+        {
+          error: "No valid instruments data available",
+          details: "Unable to fetch or parse instruments data",
+          timestamp: new Date().toISOString(),
+        },
+        { status: 500 },
+      )
     }
 
-    if (!instruments || forceRefresh) {
-      console.log("Downloading fresh instruments data")
-      instruments = await downloadAndStoreInstruments()
-    }
-
-    // Get segment statistics
+    // Generate segment statistics
     const segmentStats = {}
-    instruments.forEach((instrument) => {
-      const segment = instrument.segment
+    result.instruments.forEach((instrument) => {
+      const segment = instrument.segment || "UNKNOWN"
       segmentStats[segment] = (segmentStats[segment] || 0) + 1
     })
 
-    return NextResponse.json({
-      instruments,
-      cached: fileAge < oneHour && !forceRefresh,
-      lastUpdated: fileAge < Number.POSITIVE_INFINITY ? new Date(Date.now() - fileAge).toISOString() : null,
-      count: instruments.length,
+    const response = {
+      instruments: result.instruments,
+      cached: result.fromCache,
+      lastUpdated: result.lastUpdated,
+      count: result.instruments.length,
       allowedSegments: ALLOWED_SEGMENTS,
       segmentStats,
+      cacheStatus: result.cacheStatus,
       debug: {
-        fileAge: fileAge,
-        forceRefresh: forceRefresh,
-        hasStoredData: !!instruments,
+        forceRefresh,
+        fromCache: result.fromCache,
+        cacheAge: result.fromCache ? Date.now() - new Date(result.lastUpdated).getTime() : 0,
+        timestamp: new Date().toISOString(),
       },
-    })
+    }
+
+    return NextResponse.json(response)
   } catch (error) {
-    console.error("Error in instruments API:", error)
+    console.error("Error in GET /api/instruments:", error)
+
     return NextResponse.json(
       {
         error: "Failed to fetch instruments",
-        details: error.message,
-        stack: error.stack,
+        details: error.message || "Unknown error occurred",
+        timestamp: new Date().toISOString(),
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
       },
       { status: 500 },
     )
@@ -245,30 +432,45 @@ export async function GET(request: Request) {
 
 export async function POST() {
   try {
-    console.log("Force refreshing instruments data...")
-    const instruments = await downloadAndStoreInstruments()
+    console.log("POST /api/instruments - Force refreshing")
 
-    // Get segment statistics
+    const result = await processInstrumentsData(true)
+
+    if (!result.instruments || !Array.isArray(result.instruments)) {
+      return NextResponse.json(
+        {
+          error: "No valid instruments data available",
+          details: "Unable to fetch or parse instruments data",
+          timestamp: new Date().toISOString(),
+        },
+        { status: 500 },
+      )
+    }
+
+    // Generate segment statistics
     const segmentStats = {}
-    instruments.forEach((instrument) => {
-      const segment = instrument.segment
+    result.instruments.forEach((instrument) => {
+      const segment = instrument.segment || "UNKNOWN"
       segmentStats[segment] = (segmentStats[segment] || 0) + 1
     })
 
     return NextResponse.json({
       message: "Instruments data refreshed successfully",
-      count: instruments.length,
-      lastUpdated: new Date().toISOString(),
+      count: result.instruments.length,
+      lastUpdated: result.lastUpdated,
       allowedSegments: ALLOWED_SEGMENTS,
       segmentStats,
+      cacheStatus: result.cacheStatus,
     })
   } catch (error) {
-    console.error("Error refreshing instruments:", error)
+    console.error("Error in POST /api/instruments:", error)
+
     return NextResponse.json(
       {
         error: "Failed to refresh instruments",
-        details: error.message,
-        stack: error.stack,
+        details: error.message || "Unknown error occurred",
+        timestamp: new Date().toISOString(),
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
       },
       { status: 500 },
     )

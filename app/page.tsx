@@ -7,9 +7,11 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Download, RefreshCw, TrendingUp, CheckSquare, Square } from "lucide-react"
+import { Download, RefreshCw, TrendingUp, CheckSquare, Square, AlertCircle, Database } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { SymbolSearch } from "@/components/symbol-search"
+import { DataStatus } from "@/components/data-status"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 
 interface Instrument {
   instrument_token: string
@@ -33,36 +35,83 @@ export default function TradingSymbolExtractor() {
   const [loading, setLoading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage] = useState(50)
+  const [error, setError] = useState<string | null>(null)
+  const [cacheInfo, setCacheInfo] = useState<string | null>(null)
   const { toast } = useToast()
 
   const fetchInstruments = async (forceRefresh = false) => {
     setLoading(true)
+    setError(null)
+    setCacheInfo(null)
+
     try {
       const url = forceRefresh ? "/api/instruments?refresh=true" : "/api/instruments"
-      const response = await fetch(url)
-      if (!response.ok) {
-        throw new Error("Failed to fetch instruments")
-      }
-      const data = await response.json()
-      setInstruments(data.instruments)
-      setFilteredInstruments(data.instruments)
+      console.log("Fetching from:", url)
 
-      const cacheStatus = data.cached ? " (from cache)" : " (fresh download)"
+      const response = await fetch(url)
+      console.log("Response status:", response.status)
+      console.log("Response headers:", Object.fromEntries(response.headers.entries()))
+
+      // Check if response is actually JSON
+      const contentType = response.headers.get("content-type")
+      if (!contentType || !contentType.includes("application/json")) {
+        const textResponse = await response.text()
+        console.error("Non-JSON response:", textResponse.substring(0, 500))
+        throw new Error(`Server returned non-JSON response. Content-Type: ${contentType}`)
+      }
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.details || errorData.error || `HTTP ${response.status}`)
+      }
+
+      const data = await response.json()
+      console.log("Received data:", {
+        count: data.count,
+        cached: data.cached,
+        cacheStatus: data.cacheStatus,
+        hasError: !!data.error,
+      })
+
+      if (data.error) {
+        throw new Error(data.details || data.error)
+      }
+
+      setInstruments(data.instruments || [])
+      setFilteredInstruments(data.instruments || [])
+
+      // Set cache info for user feedback
+      const cacheStatusMessages = {
+        memory_cache: "Using memory cache (fastest)",
+        supabase_cache: "Using Supabase cache (fast)",
+        fresh_download: "Downloaded fresh data",
+        force_refresh: "Force refreshed data",
+        fallback_memory: "Using stale memory cache (API unavailable)",
+        fallback_supabase: "Using stale Supabase cache (API unavailable)",
+        no_cache: "Working without cache",
+      }
+
+      const cacheMessage = cacheStatusMessages[data.cacheStatus] || "Data loaded successfully"
+      setCacheInfo(cacheMessage)
+
       toast({
         title: "Success",
-        description: `Loaded ${data.count} filtered instruments successfully${cacheStatus}`,
+        description: `Loaded ${data.count || 0} filtered instruments successfully`,
       })
 
       if (data.lastUpdated) {
         console.log("Data last updated:", new Date(data.lastUpdated).toLocaleString())
       }
     } catch (error) {
+      console.error("Error fetching instruments:", error)
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      setError(errorMessage)
+
       toast({
         title: "Error",
-        description: "Failed to fetch instruments. Please try again.",
+        description: `Failed to fetch instruments: ${errorMessage}`,
         variant: "destructive",
       })
-      console.error("Error fetching instruments:", error)
     } finally {
       setLoading(false)
     }
@@ -133,12 +182,49 @@ export default function TradingSymbolExtractor() {
           Trading Symbol Extractor
         </h1>
         <p className="text-muted-foreground">Extract trading symbols from NFO-OPT, NFO-FUT, NSE, and BSE segments</p>
+        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Database className="h-4 w-4" />
+          <span>Multi-layer caching with automatic fallback</span>
+        </div>
       </div>
+
+      {/* Cache Info */}
+      {cacheInfo && (
+        <Alert>
+          <Database className="h-4 w-4" />
+          <AlertDescription>
+            <strong>Cache Status:</strong> {cacheInfo}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Error Display */}
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            <div className="space-y-2">
+              <p>
+                <strong>Error:</strong> {error}
+              </p>
+              {error.includes("Supabase") && (
+                <p className="text-sm">
+                  The app will continue to work using direct API calls and memory caching. Check your Supabase
+                  configuration if you want persistent caching.
+                </p>
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Data Status */}
+      <DataStatus />
 
       <Card>
         <CardHeader className="text-center">
           <CardTitle>Data Controls</CardTitle>
-          <CardDescription>Fetch trading instruments data</CardDescription>
+          <CardDescription>Fetch trading instruments data with intelligent multi-layer caching</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -156,6 +242,13 @@ export default function TradingSymbolExtractor() {
               <RefreshCw className="h-4 w-4" />
               Force Refresh
             </Button>
+          </div>
+
+          <div className="text-center text-sm text-muted-foreground space-y-1">
+            <p>
+              Data is fetched from <code className="bg-gray-100 px-1 rounded">https://api.kite.trade/instruments</code>
+            </p>
+            <p>Multi-layer caching: Memory → Supabase → Direct API with automatic fallback</p>
           </div>
         </CardContent>
       </Card>
