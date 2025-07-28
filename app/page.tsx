@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Download, RefreshCw, DownloadIcon, CheckSquare, Square } from "lucide-react"
+import { Download, RefreshCw, DownloadIcon, CheckSquare, Square, AlertCircle } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { SymbolSearch } from "@/components/symbol-search"
 
@@ -33,36 +33,52 @@ export default function TradingSymbolExtractor() {
   const [loading, setLoading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage] = useState(50)
+  const [usingMockData, setUsingMockData] = useState(false)
   const { toast } = useToast()
 
   const fetchInstruments = async (forceRefresh = false) => {
     setLoading(true)
     try {
       const url = forceRefresh ? "/api/instruments?refresh=true" : "/api/instruments"
+      console.log("Fetching from:", url)
+
       const response = await fetch(url)
+      console.log("Response status:", response.status)
+
       if (!response.ok) {
-        throw new Error("Failed to fetch instruments")
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
+
       const data = await response.json()
-      setInstruments(data.instruments)
-      setFilteredInstruments(data.instruments)
+      console.log("Received data:", {
+        count: data.count,
+        cached: data.cached,
+        hasError: !!data.error,
+      })
+
+      setInstruments(data.instruments || [])
+      setFilteredInstruments(data.instruments || [])
+      setUsingMockData(!!data.error)
 
       const cacheStatus = data.cached ? " (from cache)" : " (fresh download)"
+      const mockStatus = data.error ? " (using demo data)" : ""
+
       toast({
-        title: "Success",
-        description: `Loaded ${data.count} filtered instruments successfully${cacheStatus}`,
+        title: data.error ? "Warning" : "Success",
+        description: `Loaded ${data.count || 0} filtered instruments successfully${cacheStatus}${mockStatus}`,
+        variant: data.error ? "destructive" : "default",
       })
 
       if (data.lastUpdated) {
         console.log("Data last updated:", new Date(data.lastUpdated).toLocaleString())
       }
     } catch (error) {
+      console.error("Error fetching instruments:", error)
       toast({
         title: "Error",
-        description: "Failed to fetch instruments. Please try again.",
+        description: `Failed to fetch instruments: ${error instanceof Error ? error.message : String(error)}`,
         variant: "destructive",
       })
-      console.error("Error fetching instruments:", error)
     } finally {
       setLoading(false)
     }
@@ -132,12 +148,29 @@ export default function TradingSymbolExtractor() {
           <DownloadIcon className="h-8 w-8" />
           CA Cancellation File Downloader
         </h1>
-        <p className="text-muted-foreground">Extract trading symbols from NFO-OPT, NFO-FUT, NSE, and BSE segments for CA cancellation</p>
+        <p className="text-muted-foreground">
+          Extract trading symbols from NFO-OPT, NFO-FUT, NSE, and BSE segments for CA cancellation
+        </p>
       </div>
+
+      {/* Mock Data Warning */}
+      {usingMockData && (
+        <Card className="border-orange-200 bg-orange-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-orange-800">
+              <AlertCircle className="h-5 w-5" />
+              <p className="text-sm">
+                <strong>Demo Mode:</strong> Using sample data for demonstration. The Kite API may be unavailable or
+                require authentication.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="text-center">
-          <CardTitle className="my-0" className="my-0" className="my-0.5" className="my-5" className="my-px" className="my-px" className="my-4">Data Controls</CardTitle>
+          <CardTitle>Data Controls</CardTitle>
           <CardDescription>Fetch trading instruments data</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
