@@ -162,7 +162,7 @@ export default function TradingSymbolExtractor() {
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold flex items-center justify-center gap-2">
           <Download className="h-8 w-8" />
-          <TrendingUp className="h-8 w-8" /> {/* Changed to TrendingUp from lucide-react */}
+           {/* Changed to TrendingUp from lucide-react */}
           CA Cancellation File Downloader
         </h1>
         <p className="text-muted-foreground">Extract trading symbols from NFO-OPT, NFO-FUT, NSE, and BSE segments</p>
