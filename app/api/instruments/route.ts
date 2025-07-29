@@ -3,7 +3,7 @@ import { NextResponse } from "next/server"
 // Define the segments we want to keep
 const ALLOWED_SEGMENTS = ["NFO-OPT", "NFO-FUT", "NSE", "BSE"]
 
-// Simple in-memory cache as fallback
+// Simple in-memory cache
 let memoryCache = {
   data: null,
   timestamp: null,
@@ -139,118 +139,6 @@ function parseAndFilterCSV(csvText: string) {
   }
 }
 
-async function trySupabaseOperation(operation: () => Promise<any>) {
-  try {
-    // Check if Supabase is configured
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      console.log("Supabase not configured, skipping operation")
-      return null
-    }
-
-    const { createClient } = await import("@supabase/supabase-js")
-    const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
-
-    return await operation(supabase)
-  } catch (error) {
-    console.error("Supabase operation failed:", error.message)
-    return null
-  }
-}
-
-async function storeInSupabase(instruments: any[], csvText: string) {
-  return await trySupabaseOperation(async (supabase) => {
-    console.log("Storing instruments data in Supabase...")
-
-    // Test connection first
-    const { error: testError } = await supabase.from("instruments_cache").select("id").limit(1)
-
-    if (testError && testError.message.includes("does not exist")) {
-      console.log("Supabase table doesn't exist, skipping storage")
-      return null
-    }
-
-    if (testError && (testError.message.includes("JWT") || testError.message.includes("auth"))) {
-      console.log("Supabase authentication failed, skipping storage")
-      return null
-    }
-
-    // Prepare optimized data
-    const optimizedInstruments = instruments.map((instrument) => ({
-      tradingsymbol: instrument.tradingsymbol || "",
-      name: instrument.name || "",
-      instrument_type: instrument.instrument_type || "",
-      segment: instrument.segment || "",
-      exchange: instrument.exchange || "",
-      lot_size: instrument.lot_size || "",
-      expiry: instrument.expiry || "",
-      strike: instrument.strike || "",
-      instrument_token: instrument.instrument_token || "",
-      exchange_token: instrument.exchange_token || "",
-      last_price: instrument.last_price || "",
-      tick_size: instrument.tick_size || "",
-    }))
-
-    const dataSizeMB = JSON.stringify(optimizedInstruments).length / (1024 * 1024)
-    console.log(`Data size: ${dataSizeMB.toFixed(2)} MB`)
-
-    const csvMetadata = {
-      size: csvText.length,
-      lines: csvText.split("\n").length,
-      headers:
-        csvText
-          .split("\n")[0]
-          ?.split(",")
-          .slice(0, 10)
-          .map((h) => h.replace(/"/g, "").trim()) || [],
-    }
-
-    const cacheRecord = {
-      id: "instruments_cache",
-      instruments_data: optimizedInstruments,
-      csv_metadata: csvMetadata,
-      last_updated: new Date().toISOString(),
-      record_count: instruments.length,
-      data_size_mb: Number(dataSizeMB.toFixed(2)),
-      segments_included: ALLOWED_SEGMENTS,
-    }
-
-    const { data, error } = await supabase.from("instruments_cache").upsert(cacheRecord, { onConflict: "id" }).select()
-
-    if (error) {
-      console.error("Supabase storage error:", error.message)
-      return null
-    }
-
-    console.log("Successfully stored in Supabase")
-    return data
-  })
-}
-
-async function getFromSupabase() {
-  return await trySupabaseOperation(async (supabase) => {
-    console.log("Fetching from Supabase...")
-
-    const { data, error } = await supabase.from("instruments_cache").select("*").eq("id", "instruments_cache").single()
-
-    if (error) {
-      if (error.code === "PGRST116") {
-        console.log("No cached data found")
-        return null
-      }
-      console.error("Supabase fetch error:", error.message)
-      return null
-    }
-
-    if (!data || !Array.isArray(data.instruments_data)) {
-      console.log("Invalid data structure in cache")
-      return null
-    }
-
-    console.log(`Retrieved ${data.record_count} instruments from cache`)
-    return data
-  })
-}
-
 function isCacheValid(lastUpdated: string): boolean {
   const cacheAge = Date.now() - new Date(lastUpdated).getTime()
   return cacheAge < CACHE_DURATION
@@ -284,7 +172,6 @@ function getMemoryCache() {
 
 async function processInstrumentsData(forceRefresh = false) {
   let instruments = null
-  const fromCache = false
   let lastUpdated = new Date().toISOString()
   let cacheStatus = "no_cache"
 
@@ -302,21 +189,6 @@ async function processInstrumentsData(forceRefresh = false) {
       }
     }
 
-    // Try Supabase cache
-    if (!forceRefresh) {
-      const cachedData = await getFromSupabase()
-      if (cachedData && isCacheValid(cachedData.last_updated)) {
-        console.log("Using valid Supabase cache")
-        updateMemoryCache(cachedData.instruments_data)
-        return {
-          instruments: cachedData.instruments_data,
-          fromCache: true,
-          lastUpdated: cachedData.last_updated,
-          cacheStatus: "supabase_cache",
-        }
-      }
-    }
-
     // Download fresh data
     console.log("Downloading fresh data")
     const csvText = await downloadInstrumentsFromAPI()
@@ -326,14 +198,8 @@ async function processInstrumentsData(forceRefresh = false) {
     lastUpdated = new Date().toISOString()
     cacheStatus = forceRefresh ? "force_refresh" : "fresh_download"
 
-    // Update caches (don't fail if caching fails)
+    // Update memory cache
     updateMemoryCache(instruments)
-
-    try {
-      await storeInSupabase(parsedInstruments, csvText)
-    } catch (storageError) {
-      console.log("Supabase storage failed, continuing with fresh data")
-    }
 
     return {
       instruments,
@@ -344,7 +210,7 @@ async function processInstrumentsData(forceRefresh = false) {
   } catch (error) {
     console.error("Error processing data:", error)
 
-    // Try fallback to any available cache
+    // Try fallback to stale memory cache
     const memCache = getMemoryCache()
     if (memCache) {
       console.log("Using stale memory cache as fallback")
@@ -353,17 +219,6 @@ async function processInstrumentsData(forceRefresh = false) {
         fromCache: true,
         lastUpdated: memCache.last_updated,
         cacheStatus: "fallback_memory",
-      }
-    }
-
-    const staleSupabase = await getFromSupabase()
-    if (staleSupabase) {
-      console.log("Using stale Supabase cache as fallback")
-      return {
-        instruments: staleSupabase.instruments_data,
-        fromCache: true,
-        lastUpdated: staleSupabase.last_updated,
-        cacheStatus: "fallback_supabase",
       }
     }
 

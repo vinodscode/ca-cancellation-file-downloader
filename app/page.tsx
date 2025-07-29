@@ -7,10 +7,9 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Download, RefreshCw, TrendingUp, CheckSquare, Square, AlertCircle, Database } from "lucide-react"
+import { Download, RefreshCw, CheckSquare, Square, AlertCircle, Database } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { SymbolSearch } from "@/components/symbol-search"
-import { DataStatus } from "@/components/data-status"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 
 interface Instrument {
@@ -36,13 +35,11 @@ export default function TradingSymbolExtractor() {
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage] = useState(50)
   const [error, setError] = useState<string | null>(null)
-  const [cacheInfo, setCacheInfo] = useState<string | null>(null)
   const { toast } = useToast()
 
   const fetchInstruments = async (forceRefresh = false) => {
     setLoading(true)
     setError(null)
-    setCacheInfo(null)
 
     try {
       const url = forceRefresh ? "/api/instruments?refresh=true" : "/api/instruments"
@@ -79,20 +76,6 @@ export default function TradingSymbolExtractor() {
 
       setInstruments(data.instruments || [])
       setFilteredInstruments(data.instruments || [])
-
-      // Set cache info for user feedback
-      const cacheStatusMessages = {
-        memory_cache: "Using memory cache (fastest)",
-        supabase_cache: "Using Supabase cache (fast)",
-        fresh_download: "Downloaded fresh data",
-        force_refresh: "Force refreshed data",
-        fallback_memory: "Using stale memory cache (API unavailable)",
-        fallback_supabase: "Using stale Supabase cache (API unavailable)",
-        no_cache: "Working without cache",
-      }
-
-      const cacheMessage = cacheStatusMessages[data.cacheStatus] || "Data loaded successfully"
-      setCacheInfo(cacheMessage)
 
       toast({
         title: "Success",
@@ -178,25 +161,16 @@ export default function TradingSymbolExtractor() {
     <div className="container mx-auto p-6 space-y-6">
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold flex items-center justify-center gap-2">
-          <TrendingUp className="h-8 w-8" />
-          Trading Symbol Extractor
+          <Download className="h-8 w-8" />
+          
+          CA Cancellation File Downloader
         </h1>
         <p className="text-muted-foreground">Extract trading symbols from NFO-OPT, NFO-FUT, NSE, and BSE segments</p>
         <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
           <Database className="h-4 w-4" />
-          <span>Multi-layer caching with automatic fallback</span>
+          <span>In-memory caching with automatic fallback</span>
         </div>
       </div>
-
-      {/* Cache Info */}
-      {cacheInfo && (
-        <Alert>
-          <Database className="h-4 w-4" />
-          <AlertDescription>
-            <strong>Cache Status:</strong> {cacheInfo}
-          </AlertDescription>
-        </Alert>
-      )}
 
       {/* Error Display */}
       {error && (
@@ -207,24 +181,15 @@ export default function TradingSymbolExtractor() {
               <p>
                 <strong>Error:</strong> {error}
               </p>
-              {error.includes("Supabase") && (
-                <p className="text-sm">
-                  The app will continue to work using direct API calls and memory caching. Check your Supabase
-                  configuration if you want persistent caching.
-                </p>
-              )}
             </div>
           </AlertDescription>
         </Alert>
       )}
 
-      {/* Data Status */}
-      <DataStatus />
-
       <Card>
         <CardHeader className="text-center">
           <CardTitle>Data Controls</CardTitle>
-          <CardDescription>Fetch trading instruments data with intelligent multi-layer caching</CardDescription>
+          <CardDescription>Fetch trading instruments data with intelligent in-memory caching</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -248,7 +213,7 @@ export default function TradingSymbolExtractor() {
             <p>
               Data is fetched from <code className="bg-gray-100 px-1 rounded">https://api.kite.trade/instruments</code>
             </p>
-            <p>Multi-layer caching: Memory → Supabase → Direct API with automatic fallback</p>
+            <p>Caching: Memory → Direct API with automatic fallback</p>
           </div>
         </CardContent>
       </Card>
