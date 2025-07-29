@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Download, RefreshCw, CheckSquare, Square, AlertCircle, Database } from "lucide-react"
+import { Download, RefreshCw, CheckSquare, Square, AlertCircle, Database, TrendingUp } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { SymbolSearch } from "@/components/symbol-search"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -162,14 +162,11 @@ export default function TradingSymbolExtractor() {
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold flex items-center justify-center gap-2">
           <Download className="h-8 w-8" />
-          
+          <TrendingUp className="h-8 w-8" /> {/* Changed to TrendingUp from lucide-react */}
           CA Cancellation File Downloader
         </h1>
         <p className="text-muted-foreground">Extract trading symbols from NFO-OPT, NFO-FUT, NSE, and BSE segments</p>
-        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Database className="h-4 w-4" />
-          <span>In-memory caching with automatic fallback</span>
-        </div>
+        
       </div>
 
       {/* Error Display */}
@@ -189,7 +186,7 @@ export default function TradingSymbolExtractor() {
       <Card>
         <CardHeader className="text-center">
           <CardTitle>Data Controls</CardTitle>
-          <CardDescription>Fetch trading instruments data with intelligent in-memory caching</CardDescription>
+          
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -213,7 +210,7 @@ export default function TradingSymbolExtractor() {
             <p>
               Data is fetched from <code className="bg-gray-100 px-1 rounded">https://api.kite.trade/instruments</code>
             </p>
-            <p>Caching: Memory → Direct API with automatic fallback</p>
+            
           </div>
         </CardContent>
       </Card>
@@ -226,6 +223,8 @@ export default function TradingSymbolExtractor() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
+              {" "}
+              {/* Corrected className */}
               <CheckSquare className="h-5 w-5" />
               Selection Controls
             </CardTitle>
